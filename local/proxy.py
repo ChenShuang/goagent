@@ -147,7 +147,7 @@ class Logging(type(sys)):
 
     def exception(self, fmt, *args, **kwargs):
         self.error(fmt, *args, **kwargs)
-        traceback.print_exc(file=sys.stderr)
+#        traceback.print_exc(file=sys.stderr)
 
     def critical(self, fmt, *args, **kwargs):
         self.__set_error_color()
@@ -462,8 +462,8 @@ class PacUtil(object):
     @staticmethod
     def update_pacfile(filename):
         listen_ip = ProxyUtil.get_listen_ip() if common.LISTEN_IP in ('', '::', '0.0.0.0') else common.LISTEN_IP
-        autoproxy = '%s:%s' % (listen_ip, common.LISTEN_PORT)
-        blackhole = '%s:%s' % (listen_ip, common.PAC_PORT)
+        autoproxy = '127.0.0.1:%s' % (common.LISTEN_PORT)
+        blackhole = '127.0.0.1:%s' % (common.PAC_PORT)
         default = '%s:%s' % (common.PROXY_HOST, common.PROXY_PORT) if common.PROXY_ENABLE else 'DIRECT'
         opener = urllib2.build_opener(urllib2.ProxyHandler({'http': autoproxy, 'https': autoproxy}))
         content = ''
@@ -1563,7 +1563,7 @@ class RangeFetch(object):
         range_queue.put((start, end, self.response))
         for begin in range(end+1, length, self.maxsize):
             range_queue.put((begin, min(begin+self.maxsize-1, length-1), None))
-        any(thread.start_new_thread(self.__fetchlet, (range_queue, data_queue)) for _ in range(self.threads))
+        [thread.start_new_thread(self.__fetchlet, (range_queue, data_queue)) for _ in range(self.threads)]
         has_peek = hasattr(data_queue, 'peek')
         peek_timeout = 90
         expect_begin = start
@@ -1670,7 +1670,7 @@ class RangeFetch(object):
                 else:
                     logging.error('RangeFetch %r return %s', self.url, response.status)
                     response.close()
-                    #range_queue.put((start, end, None))
+                    range_queue.put((start, end, None))
                     continue
             except Exception as e:
                 logging.exception('RangeFetch._fetchlet error:%s', e)
@@ -2338,6 +2338,8 @@ class PACServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         with open(filename, 'rb') as fp:
             data = fp.read()
         if data:
+            if filename.endswith('.pac'):
+                data = re.sub(r"127\.0\.0\.1", ProxyUtil.get_listen_ip() if common.LISTEN_IP in ('', '::', '0.0.0.0') else common.LISTEN_IP, data)
             self.wfile.write(('HTTP/1.1 200\r\nContent-Type: %s\r\nContent-Length: %s\r\n\r\n' % (mimetype, len(data))).encode())
             self.wfile.write(data)
 
