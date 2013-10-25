@@ -450,9 +450,14 @@ class ProxyUtil(object):
     @staticmethod
     def get_listen_ip():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.connect(('8.8.8.8', 53))
-        listen_ip = sock.getsockname()[0]
-        sock.close()
+        try:
+			sock.connect(('8.8.8.8', 53))
+			listen_ip = sock.getsockname()[0]
+        except Exception:
+            listen_ip = '127.0.0.1'
+        finally:
+            if sock:
+                sock.close()
         return listen_ip
 
 
@@ -1364,6 +1369,8 @@ class Common(object):
         self.AUTORANGE_WAITSIZE = self.CONFIG.getint('autorange', 'waitsize')
         self.AUTORANGE_BUFSIZE = self.CONFIG.getint('autorange', 'bufsize')
         self.AUTORANGE_THREADS = self.CONFIG.getint('autorange', 'threads')
+        self.AUTORANGE_MINTHREADS = self.CONFIG.getint('autorange', 'minthreads')
+        self.AUTORANGE_MAXTHREADS = self.CONFIG.getint('autorange', 'maxthreads')
 
         self.FETCHMAX_LOCAL = self.CONFIG.getint('fetchmax', 'local') if self.CONFIG.get('fetchmax', 'local') else 3
         self.FETCHMAX_SERVER = self.CONFIG.get('fetchmax', 'server')
@@ -1525,7 +1532,7 @@ class RangeFetch(object):
     waitsize = 1024*512
     urlfetch = staticmethod(gae_urlfetch)
 
-    def __init__(self, wfile, response, method, url, headers, payload, fetchservers, password, maxsize=0, bufsize=0, waitsize=0, threads=0):
+    def __init__(self, wfile, response, method, url, headers, payload, fetchservers, password, maxsize=0, bufsize=0, waitsize=0, threads=0, minthreads=0, maxthreads=0):
         self.wfile = wfile
         self.response = response
         self.command = method
@@ -1538,6 +1545,10 @@ class RangeFetch(object):
         self.bufsize = bufsize or self.__class__.bufsize
         self.waitsize = waitsize or self.__class__.bufsize
         self.threads = threads or self.__class__.threads
+        self.minthreads = minthreads or self.__class__.minthreads
+        self.maxthreads = maxthreads or self.__class__.maxthreads
+        self.lockobj = thread.allocate_lock()
+        self.curThreads = 0
         self._stopped = None
         self._last_app_status = {}
 
@@ -1563,7 +1574,8 @@ class RangeFetch(object):
         range_queue.put((start, end, self.response))
         for begin in range(end+1, length, self.maxsize):
             range_queue.put((begin, min(begin+self.maxsize-1, length-1), None))
-        [thread.start_new_thread(self.__fetchlet, (range_queue, data_queue)) for _ in range(self.threads)]
+        self.curThreads = self.threads
+        [thread.start_new_thread(self.__fetchlet, (range_queue, data_queue)) for _ in range(self.curThreads)]
         has_peek = hasattr(data_queue, 'peek')
         peek_timeout = 90
         expect_begin = start
@@ -1601,6 +1613,25 @@ class RangeFetch(object):
                 break
         self._stopped = True
 
+    def __finish_now(self):
+        self.lockobj.acquire()
+        if (self.curThreads > self.minthreads):
+            self.curThreads -= 1
+            logging.info('>>>>>>>>>>>>>>> [thread %s] finished. Total: %s thread(s)', threading.currentThread().ident, self.curThreads)
+            self.lockobj.release()
+            return True
+        else:
+            self.lockobj.release()
+            return False
+
+    def __add_thread(self, range_queue, data_queue):
+        self.lockobj.acquire()
+        if (self.curThreads < max(self.threads, self.maxthreads * random.random())):
+            self.curThreads += 1
+            logging.info('>>>>>>>>>>>>>>> [thread %s] started. Total: %s thread(s)', thread.start_new_thread(self.__fetchlet, (range_queue, data_queue)), self.curThreads)
+        self.lockobj.release()
+
+
     def __fetchlet(self, range_queue, data_queue):
         headers = dict((k.title(), v) for k, v in self.headers.items())
         headers['Connection'] = 'close'
@@ -1625,10 +1656,14 @@ class RangeFetch(object):
                 except Exception as e:
                     logging.warning("Response %r in __fetchlet", e)
                     range_queue.put((start, end, None))
+                    if (self.__finish_now()):
+                        return
                     continue
                 if not response:
                     logging.warning('RangeFetch %s return %r', headers['Range'], response)
                     range_queue.put((start, end, None))
+                    if (self.__finish_now()):
+                        return
                     continue
                 if fetchserver:
                     self._last_app_status[fetchserver] = response.app_status
@@ -1636,12 +1671,16 @@ class RangeFetch(object):
                     logging.warning('Range Fetch "%s %s" %s return %s', self.command, self.url, headers['Range'], response.app_status)
                     response.close()
                     range_queue.put((start, end, None))
+                    if (self.__finish_now()):
+                        return
                     continue
                 if response.getheader('Location'):
                     self.url = urlparse.urljoin(self.url, response.getheader('Location'))
                     logging.info('RangeFetch Redirect(%r)', self.url)
                     response.close()
                     range_queue.put((start, end, None))
+                    if (self.__finish_now()):
+                        return
                     continue
                 if 200 <= response.status < 300:
                     content_range = response.getheader('Content-Range')
@@ -1649,6 +1688,8 @@ class RangeFetch(object):
                         logging.warning('RangeFetch "%s %s" return Content-Range=%r: response headers=%r', self.command, self.url, content_range, response.getheaders())
                         response.close()
                         range_queue.put((start, end, None))
+                        if (self.__finish_now()):
+                            return
                         continue
                     content_length = int(response.getheader('Content-Length', 0))
                     logging.info('>>>>>>>>>>>>>>> [thread %s] %s %s', threading.currentThread().ident, content_length, content_range)
@@ -1666,11 +1707,16 @@ class RangeFetch(object):
                         logging.warning('RangeFetch "%s %s" retry %s-%s', self.command, self.url, start, end)
                         response.close()
                         range_queue.put((start, end, None))
+                        if (self.__finish_now()):
+                            return
                         continue
+                    self.__add_thread(range_queue, data_queue)
                 else:
                     logging.error('RangeFetch %r return %s', self.url, response.status)
                     response.close()
                     range_queue.put((start, end, None))
+                    if (self.__finish_now()):
+                        return
                     continue
             except Exception as e:
                 logging.exception('RangeFetch._fetchlet error:%s', e)
@@ -2000,7 +2046,7 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     logging.info('%s "GAE %s %s HTTP/1.1" %s %s', self.address_string(), self.command, self.path, response.status, response.getheader('Content-Length', '-'))
                     if response.status == 206:
                         fetchservers = [re.sub(r'//\w+\.appspot\.com', '//%s.appspot.com' % appid, common.GAE_FETCHSERVER) for appid in common.GAE_APPIDS]
-                        rangefetch = RangeFetch(self.wfile, response, self.command, self.path, self.headers, payload, fetchservers, common.GAE_PASSWORD, maxsize=common.AUTORANGE_MAXSIZE, bufsize=common.AUTORANGE_BUFSIZE, waitsize=common.AUTORANGE_WAITSIZE, threads=common.AUTORANGE_THREADS)
+                        rangefetch = RangeFetch(self.wfile, response, self.command, self.path, self.headers, payload, fetchservers, common.GAE_PASSWORD, maxsize=common.AUTORANGE_MAXSIZE, bufsize=common.AUTORANGE_BUFSIZE, waitsize=common.AUTORANGE_WAITSIZE, threads=common.AUTORANGE_THREADS, minthreads=common.AUTORANGE_MINTHREADS, maxthreads=common.AUTORANGE_MAXTHREADS)
                         return rangefetch.fetch()
                     if response.getheader('Set-Cookie'):
                         response_replace_header(response, 'Set-Cookie', self.normcookie(response.getheader('Set-Cookie')))
