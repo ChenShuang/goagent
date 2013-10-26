@@ -799,6 +799,8 @@ def spawn_later(seconds, target, *args, **kwargs):
 class HTTPUtil(object):
     """HTTP Request Class"""
 
+    re_ipv4 = re.compile(r'^(?:[\d]{1,3})\.(?:[\d]{1,3})\.(?:[\d]{1,3})\.(?:[\d]{1,3})$')
+    re_ipv6 = re.compile(r'^(((?=.*(::))(?!.*\3.+\3))\3?|[\dA-F]{1,4}:)([\dA-F]{1,4}(\3|:\b)|\2){5}(([\dA-F]{1,4}(\3|:\b|$)|\2){2}|(((2[0-4]|1\d|[1-9])?\d|25[0-5])\.?\b){4})\Z', re.I|re.S)
     MessageClass = dict
     protocol_version = 'HTTP/1.1'
     skip_headers = frozenset(['Vary', 'Via', 'X-Forwarded-For', 'Proxy-Authorization', 'Proxy-Connection', 'Upgrade', 'X-Chrome-Variations', 'Connection', 'Cache-Control'])
@@ -884,9 +886,19 @@ class HTTPUtil(object):
         return iplist
 
     def create_connection(self, address, timeout=None, source_address=None):
+        def _DNS_Resolve(host):
+            if self.re_ipv4.match(host) or self.re_ipv6.match(host):
+                return host
+            try:
+                host = socket.getaddrinfo(host, 0)[0][-1][0]
+            except:
+                pass
+            return host
+
         def _create_connection(address, timeout, queobj):
             sock = None
             try:
+                address = (_DNS_Resolve(address[0]),) + address[1:]
                 # create a ipv4/ipv6 socket object
                 sock = socket.socket(socket.AF_INET if ':' not in address[0] else socket.AF_INET6)
                 # set reuseaddr option to avoid 10048 socket error
