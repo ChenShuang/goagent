@@ -871,11 +871,16 @@ class HTTPUtil(object):
             self.ssl_ciphers = ':'.join(x for x in self.ssl_ciphers.split(':') if random.random() > 0.5)
             self.ssl_context.set_cipher_list(self.ssl_ciphers)
 
-    def dns_resolve(self, host, dnsserver='', ipv4_only=True):
+    def dns_resolve(self, host, dnsserver='', ipv4_only=False):
+        if self.re_ipv4.match(host) or self.re_ipv6.match(host):
+            return [host];
         iplist = self.dns.get(host)
         if not iplist:
             if not dnsserver:
-                iplist = list(set(socket.gethostbyname_ex(host)[-1]) - DNSUtil.blacklist)
+                try:
+                    iplist = list(set(socket.gethostbyname_ex(host)[-1]) - DNSUtil.blacklist)
+                except: 
+                    iplist = list(set(x[-1][0] for x in socket.getaddrinfo(host, None)) - DNSUtil.blacklist)
             else:
                 iplist = DNSUtil.remote_resolve(dnsserver, host, timeout=2)
             if not iplist:
@@ -886,19 +891,10 @@ class HTTPUtil(object):
         return iplist
 
     def create_connection(self, address, timeout=None, source_address=None):
-        def _DNS_Resolve(host):
-            if self.re_ipv4.match(host) or self.re_ipv6.match(host):
-                return host
-            try:
-                host = socket.getaddrinfo(host, 0)[0][-1][0]
-            except:
-                pass
-            return host
-
         def _create_connection(address, timeout, queobj):
             sock = None
             try:
-                address = (_DNS_Resolve(address[0]),) + address[1:]
+                address = (self.dns_resolve(address[0])[0],) + address[1:];
                 # create a ipv4/ipv6 socket object
                 sock = socket.socket(socket.AF_INET if ':' not in address[0] else socket.AF_INET6)
                 # set reuseaddr option to avoid 10048 socket error
@@ -958,6 +954,7 @@ class HTTPUtil(object):
             sock = None
             ssl_sock = None
             try:
+                ipaddr = (self.dns_resolve(ipaddr[0])[0],) + ipaddr[1:];
                 # create a ipv4/ipv6 socket object
                 sock = socket.socket(socket.AF_INET if ':' not in ipaddr[0] else socket.AF_INET6)
                 # set reuseaddr option to avoid 10048 socket error
@@ -1008,6 +1005,7 @@ class HTTPUtil(object):
             sock = None
             ssl_sock = None
             try:
+                ipaddr = (self.dns_resolve(ipaddr[0])[0],) + ipaddr[1:];
                 # create a ipv4/ipv6 socket object
                 sock = socket.socket(socket.AF_INET if ':' not in ipaddr[0] else socket.AF_INET6)
                 # set reuseaddr option to avoid 10048 socket error
@@ -1404,6 +1402,12 @@ class Common(object):
         else:
             self.LIGHT_ENABLE = 0
 
+        if self.CONFIG.has_section('local'):
+            self.LOCAL_ENABLE = self.CONFIG.getint('local', 'enable')
+            self.LOCAL_LISTEN = self.CONFIG.get('local', 'listen')
+        else:
+            self.LOCAL_ENABLE = 0
+
         self.USERAGENT_ENABLE = self.CONFIG.getint('useragent', 'enable')
         self.USERAGENT_STRING = self.CONFIG.get('useragent', 'string')
 
@@ -1414,6 +1418,9 @@ class Common(object):
         self.HOSTS = DictType(self.CONFIG.items('hosts'))
         self.HOSTS_MATCH = DictType((re.compile(k).search, v) for k, v in self.HOSTS.items() if not re.search(r'\d+$', k))
         self.HOSTS_CONNECT_MATCH = DictType((re.compile(k).search, v) for k, v in self.HOSTS.items() if re.search(r'\d+$', k))
+
+        self.MYHOSTS = DictType(self.CONFIG.items('myhosts'))
+        self.MYHOSTS_MATCH = DictType((re.compile(k).search, v) for k, v in self.MYHOSTS.items() if not re.search(r'\d+$', k))
 
         random.shuffle(self.GAE_APPIDS)
         self.GAE_FETCHSERVER = '%s://%s.appspot.com%s?' % (self.GOOGLE_MODE, self.GAE_APPIDS[0], self.GAE_PATH)
@@ -1443,6 +1450,8 @@ class Common(object):
         if common.LIGHT_ENABLE:
             info += 'LIGHT Listen       : %s\n' % common.LIGHT_LISTEN
             info += 'LIGHT Server       : %s\n' % common.LIGHT_SERVER
+        if common.LOCAL_ENABLE:
+            info += 'LOCAL Listen       : %s\n' % common.LOCAL_LISTEN
         info += '------------------------------------------------------\n'
         return info
 
@@ -2355,6 +2364,108 @@ class PAASProxyHandler(GAEProxyHandler):
                 raise
 
 
+
+
+class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+    __base = BaseHTTPServer.BaseHTTPRequestHandler
+    __base_handle = __base.handle
+
+    server_version = "MyHTTPProxy/1.0"
+    rbufsize = 0                        # self.rfile Be unbuffered
+
+    def handle(self):
+        (ip, port) =  self.client_address
+        if hasattr(self, 'allowed_clients') and ip not in self.allowed_clients:
+            self.raw_requestline = self.rfile.readline()
+            if self.parse_request(): self.send_error(403)
+        else:
+            self.__base_handle()
+
+    def _connect_to(self, netloc):
+        i = netloc.find(':')
+        if i >= 0:
+            host_port = netloc[:i], int(netloc[i+1:])
+        else:
+            host_port = netloc, 80
+        if common.MYHOSTS_MATCH and any(x(host_port[0]) for x in common.MYHOSTS_MATCH):
+            host_port = next(common.MYHOSTS_MATCH[x] for x in common.MYHOSTS_MATCH if x(host_port[0])), host_port[1] 
+        if HTTPUtil.re_ipv6.match(host_port[0]):
+            soc = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            logging.info('IPV6 connection to %s', host_port)
+        else:
+            soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try: soc.connect(host_port)
+        except socket.error, arg:
+            try: msg = arg[1]
+            except: msg = arg
+            self.send_error(404, msg)
+            return (soc, False)
+        return (soc, True)
+
+    def do_CONNECT(self):
+        (soc, success) = self._connect_to(self.path);
+        try:
+            if success:
+                self.log_request(200)
+                self.wfile.write(self.protocol_version +
+                                 " 200 Connection established\r\n")
+                self.wfile.write("Proxy-agent: %s\r\n" % self.version_string())
+                self.wfile.write("\r\n")
+                self._read_write(soc, 300)
+        finally:
+            soc.close()
+            self.connection.close()
+
+    def do_GET(self):
+        (scm, netloc, path, params, query, fragment) = urlparse.urlparse(
+            self.path, 'http')
+        if scm != 'http' or fragment or not netloc:
+            self.send_error(400, "bad url %s" % self.path)
+            return
+        (soc, success) = self._connect_to(netloc);
+        try:
+            if success:
+                self.log_request()
+                soc.send("%s %s %s\r\n" % (
+                    self.command,
+                    urlparse.urlunparse(('', '', path, params, query, '')),
+                    self.request_version))
+                self.headers['Connection'] = 'close'
+                del self.headers['Proxy-Connection']
+                for key_val in self.headers.items():
+                    soc.send("%s: %s\r\n" % key_val)
+                soc.send("\r\n")
+                self._read_write(soc)
+        finally:
+            soc.close()
+            self.connection.close()
+
+    def _read_write(self, soc, max_idling=20):
+        iw = [self.connection, soc]
+        ow = []
+        count = 0
+        while 1:
+            count += 1
+            (ins, _, exs) = select.select(iw, ow, iw, 3)
+            if exs: break
+            if ins:
+                for i in ins:
+                    if i is soc:
+                        out = self.connection
+                    else:
+                        out = soc
+                    data = i.recv(8192)
+                    if data:
+                        out.send(data)
+                        count = 0
+            else:
+                pass#print "\t" "idle", count
+            if count == max_idling: break
+    do_HEAD = do_GET
+    do_POST = do_GET
+    do_PUT  = do_GET
+    do_DELETE=do_GET
+
 class PACServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     pacfile = os.path.join(os.path.dirname(os.path.abspath(__file__)), common.PAC_FILE)
@@ -2577,6 +2688,11 @@ def main():
         server.max_cache_size = common.DNS_CACHESIZE
         thread.start_new_thread(server.serve_forever, tuple())
 
+    if common.LOCAL_ENABLE:
+        host, port = common.LOCAL_LISTEN.split(':')
+        server = LocalProxyServer(('127.0.0.1', 8090), LocalProxyHandler)
+        thread.start_new_thread(server.serve_forever, tuple())
+    
     server = LocalProxyServer((common.LISTEN_IP, common.LISTEN_PORT), GAEProxyHandler)
     server.serve_forever()
 
