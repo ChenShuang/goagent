@@ -19,7 +19,7 @@
 #      Wang Wei Qiang <wwqgtxx@gmail.com>
 #      Poly Rabbit    <mcx_221@foxmail.com>
 
-__version__ = '3.0.5'
+__version__ = '3.0.6'
 
 import sys
 import os
@@ -39,6 +39,7 @@ except (ImportError, SystemError):
     gevent = None
 
 import errno
+import binascii
 import time
 import struct
 import collections
@@ -337,17 +338,24 @@ class CertUtil(object):
         if not os.path.exists(certdir):
             os.makedirs(certdir)
 
-gevent_wait_read = gevent.socket.wait_read if 'gevent.socket' in sys.modules else lambda fd,t: select.select([fd], [], [fd], t)
-gevent_wait_write = gevent.socket.wait_write if 'gevent.socket' in sys.modules else lambda fd,t: select.select([], [fd], [fd], t)
-gevent_wait_readwrite = gevent.socket.wait_readwrite if 'gevent.socket' in sys.modules else lambda fd,t: select.select([fd], [fd], [fd], t)
 
 class SSLConnection(object):
+
+    has_gevent = socket.socket is getattr(sys.modules.get('gevent.socket'), 'socket', None)
 
     def __init__(self, context, sock):
         self._context = context
         self._sock = sock
         self._connection = OpenSSL.SSL.Connection(context, sock)
         self._makefile_refs = 0
+        if self.has_gevent:
+            self._wait_read = gevent.socket.wait_read
+            self._wait_write = gevent.socket.wait_write
+            self._wait_readwrite = gevent.socket.wait_readwrite
+        else:
+            self._wait_read = lambda fd,t: select.select([fd], [], [fd], t)
+            self._wait_write = lambda fd,t: select.select([], [fd], [fd], t)
+            self._wait_readwrite = lambda fd,t: select.select([fd], [fd], [fd], t)
 
     def __getattr__(self, attr):
         if attr not in ('_context', '_sock', '_connection', '_makefile_refs'):
@@ -366,7 +374,7 @@ class SSLConnection(object):
                 break
             except (OpenSSL.SSL.WantReadError, OpenSSL.SSL.WantX509LookupError, OpenSSL.SSL.WantWriteError):
                 sys.exc_clear()
-                gevent_wait_readwrite(self._sock.fileno(), timeout)
+                self._wait_readwrite(self._sock.fileno(), timeout)
 
     def connect(self, *args, **kwargs):
         timeout = self._sock.gettimeout()
@@ -376,10 +384,10 @@ class SSLConnection(object):
                 break
             except (OpenSSL.SSL.WantReadError, OpenSSL.SSL.WantX509LookupError):
                 sys.exc_clear()
-                gevent_wait_read(self._sock.fileno(), timeout)
+                self._wait_read(self._sock.fileno(), timeout)
             except OpenSSL.SSL.WantWriteError:
                 sys.exc_clear()
-                gevent_wait_write(self._sock.fileno(), timeout)
+                self._wait_write(self._sock.fileno(), timeout)
 
     def send(self, data, flags=0):
         timeout = self._sock.gettimeout()
@@ -389,10 +397,10 @@ class SSLConnection(object):
                 break
             except (OpenSSL.SSL.WantReadError, OpenSSL.SSL.WantX509LookupError):
                 sys.exc_clear()
-                gevent_wait_read(self._sock.fileno(), timeout)
+                self._wait_read(self._sock.fileno(), timeout)
             except OpenSSL.SSL.WantWriteError:
                 sys.exc_clear()
-                gevent_wait_write(self._sock.fileno(), timeout)
+                self._wait_write(self._sock.fileno(), timeout)
             except OpenSSL.SSL.SysCallError as e:
                 if e[0] == -1 and not data:
                     # errors when writing empty strings are expected and can be ignored
@@ -409,10 +417,10 @@ class SSLConnection(object):
                 return self._connection.recv(bufsiz, flags)
             except (OpenSSL.SSL.WantReadError, OpenSSL.SSL.WantX509LookupError):
                 sys.exc_clear()
-                gevent_wait_read(self._sock.fileno(), timeout)
+                self._wait_read(self._sock.fileno(), timeout)
             except OpenSSL.SSL.WantWriteError:
                 sys.exc_clear()
-                gevent_wait_write(self._sock.fileno(), timeout)
+                self._wait_write(self._sock.fileno(), timeout)
             except OpenSSL.SSL.ZeroReturnError:
                 return ''
 
@@ -862,8 +870,18 @@ class HTTPUtil(object):
         self.ssl_obfuscate = ssl_obfuscate or self.ssl_obfuscate
         if self.ssl_validate or self.ssl_obfuscate:
             self.ssl_context = OpenSSL.SSL.Context(OpenSSL.SSL.TLSv1_METHOD)
+            self.ssl_context.set_session_id(binascii.b2a_hex(os.urandom(10)))
             if hasattr(OpenSSL.SSL, 'SESS_CACHE_BOTH'):
                 self.ssl_context.set_session_cache_mode(OpenSSL.SSL.SESS_CACHE_BOTH)
+            else:
+                try:
+                    import ctypes
+                    SSL_CTRL_SET_SESS_CACHE_MODE = 44
+                    SESS_CACHE_BOTH = 0x3
+                    ctx = ctypes.c_void_p.from_address(id(self.ssl_context)+ctypes.sizeof(ctypes.c_int)+ctypes.sizeof(ctypes.c_voidp))
+                    ctypes.cdll.ssleay32.SSL_CTX_ctrl(ctx, SSL_CTRL_SET_SESS_CACHE_MODE, SESS_CACHE_BOTH, None)
+                except Exception as e:
+                    logging.warning('SSL_CTX_set_session_cache_mode failed: %r', e)
         else:
             self.ssl_context = None
         if self.ssl_validate:
@@ -1211,7 +1229,7 @@ class HTTPUtil(object):
         if crlf:
             need_crlf = 1
         if need_crlf:
-            request_data = 'GET / HTTP/1.1\r\n\r\n\r\n'
+            request_data = 'GET / HTTP/1.1\r\n\r\n\r\n\r\n\r\r'
         else:
             request_data = ''
         request_data += '%s %s %s\r\n' % (method, path, protocol_version)
@@ -1246,7 +1264,7 @@ class HTTPUtil(object):
         if return_sock:
             return sock
 
-        response = httplib.HTTPResponse(sock)
+        response = httplib.HTTPResponse(sock, buffering=True)
         try:
             response.begin()
         except httplib.BadStatusLine:
@@ -1327,6 +1345,7 @@ class Common(object):
         self.GAE_CRLF = self.CONFIG.getint('gae', 'crlf')
         self.GAE_VALIDATE = self.CONFIG.getint('gae', 'validate')
         self.GAE_OBFUSCATE = self.CONFIG.getint('gae', 'obfuscate') if self.CONFIG.has_option('gae', 'obfuscate') else 0
+        self.GAE_OPTIONS = self.CONFIG.get('gae', 'options') if self.CONFIG.has_option('gae', 'options') else ''
 
         self.PAC_ENABLE = self.CONFIG.getint('pac', 'enable')
         self.PAC_IP = self.CONFIG.get('pac', 'ip')
@@ -1418,6 +1437,10 @@ class Common(object):
 
         DictType = getattr(collections, 'OrderedDict', dict)
         self.HOSTS = DictType(self.CONFIG.items('hosts'))
+        for key, value in self.HOSTS.items():
+            m = re.match(r'\[(\w+)\](\w+)', value)
+            if m:
+                self.HOSTS[key] = self.CONFIG.get(m.group(1), m.group(2))
         self.HOSTS_MATCH = DictType((re.compile(k).search, v) for k, v in self.HOSTS.items() if not re.search(r'\d+$', k))
         self.HOSTS_CONNECT_MATCH = DictType((re.compile(k).search, v) for k, v in self.HOSTS.items() if re.search(r'\d+$', k))
 
@@ -1499,6 +1522,78 @@ def response_replace_header(response, name, value):
         response.header.replace_header(name, value)
 
 
+def rc4crypt(data, key):
+    """RC4 algorithm"""
+    if not key or not data:
+        return data
+    x = 0
+    box = range(256)
+    for i, y in enumerate(box):
+        x = (x + y + ord(key[i % len(key)])) & 0xff
+        box[i], box[x] = box[x], y
+    x = y = 0
+    out = []
+    out_append = out.append
+    for char in data:
+        x = (x + 1) & 0xff
+        y = (y + box[x]) & 0xff
+        box[x], box[y] = box[y], box[x]
+        out_append(chr(ord(char) ^ box[(box[x] + box[y]) & 0xff]))
+    return ''.join(out)
+
+
+class RC4FileObject(object):
+    """fileobj for rc4"""
+    def __init__(self, stream, key):
+        self.__stream = stream
+        x = 0
+        box = range(256)
+        for i, y in enumerate(box):
+            x = (x + y + ord(key[i % len(key)])) & 0xff
+            box[i], box[x] = box[x], y
+        self.__box = box
+        self.__x = 0
+        self.__y = 0
+
+    def __getattr__(self, attr):
+        if attr not in ('__stream', '__box', '__x', '__y'):
+            return getattr(self.__stream, attr)
+
+    def read(self, size=-1):
+        out = []
+        out_append = out.append
+        x = self.__x
+        y = self.__y
+        box = self.__box
+        data = self.__stream.read(size)
+        for char in data:
+            x = (x + 1) & 0xff
+            y = (y + box[x]) & 0xff
+            box[x], box[y] = box[y], box[x]
+            out_append(chr(ord(char) ^ box[(box[x] + box[y]) & 0xff]))
+        self.__x = x
+        self.__y = y
+        return ''.join(out)
+
+
+try:
+    import Crypto.Cipher.ARC4
+    def rc4crypt(data, key):
+        return Crypto.Cipher.ARC4.new(key).encrypt(data)
+    class RC4FileObject(object):
+        """fileobj for rc4"""
+        def __init__(self, stream, key):
+            self.__stream = stream
+            self.__cipher = Crypto.Cipher.ARC4.new(key)
+        def __getattr__(self, attr):
+            if attr not in ('__stream', '__cipher'):
+                return getattr(self.__stream, attr)
+        def read(self, size=-1):
+            return self.__cipher.encrypt(self.__stream.read(size))
+except ImportError:
+    pass
+
+
 def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
     # deflate = lambda x:zlib.compress(x)[2:-4]
     if payload:
@@ -1514,18 +1609,34 @@ def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
     metadata = 'G-Method:%s\nG-Url:%s\n%s' % (method, url, ''.join('G-%s:%s\n' % (k, v) for k, v in kwargs.items() if v))
     skip_headers = http_util.skip_headers
     metadata += ''.join('%s:%s\n' % (k.title(), v) for k, v in headers.items() if k not in skip_headers)
-    metadata = zlib.compress(metadata)[2:-4]
-    need_crlf = 0 if fetchserver.startswith('https') else common.GAE_CRLF
+    # prepare GAE request
+    request_method = 'POST'
+    request_headers = {}
     if common.GAE_OBFUSCATE:
-        cookie = base64.b64encode(metadata).strip().decode()
-        if not payload:
-            response = http_util.request('GET', fetchserver, payload, {'Cookie': cookie}, crlf=need_crlf)
+        if 'rc4' in common.GAE_OPTIONS:
+            request_headers['X-GOA-Options'] = 'rc4'
+            cookie = base64.b64encode(rc4crypt(zlib.compress(metadata)[2:-4], kwargs.get('password'))).strip()
+            payload = rc4crypt(payload, kwargs.get('password'))
         else:
-            response = http_util.request('POST', fetchserver, payload, {'Cookie': cookie, 'Content-Length': str(len(payload))}, crlf=need_crlf)
+            cookie = base64.b64encode(zlib.compress(metadata)[2:-4]).strip()
+        request_headers['Cookie'] = cookie
+        if payload:
+            request_headers['Content-Length'] = str(len(payload))
+        else:
+            request_method = 'GET'
     else:
-        payload = b''.join((struct.pack('!h', len(metadata)), metadata, payload))
-        response = http_util.request('POST', fetchserver, payload, {'Content-Length': str(len(payload))}, crlf=need_crlf)
+        if 'rc4' in common.GAE_OPTIONS:
+            request_headers['X-GOA-Options'] = 'rc4'
+            metadata = rc4crypt(metadata, kwargs.get('password'))
+            payload = rc4crypt(payload, kwargs.get('password'))
+        metadata = zlib.compress(metadata)[2:-4]
+        payload = '%s%s%s' % (struct.pack('!h', len(metadata)), metadata, payload)
+        request_headers['Content-Length'] = str(len(payload))
+    # post data
+    need_crlf = 0 if common.GOOGLE_MODE == 'https' else common.GAE_CRLF
+    response = http_util.request(request_method, fetchserver, payload, request_headers, crlf=need_crlf)
     response.app_status = response.status
+    response.app_options = response.getheader('X-GOA-Options', '')
     if response.status != 200:
         if response.status in (400, 405):
             # filter by some firewall
@@ -1535,14 +1646,21 @@ def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
     if len(data) < 4:
         response.status = 502
         response.fp = io.BytesIO(b'connection aborted. too short leadtype data=' + data)
+        response.read = response.fp.read
         return response
     response.status, headers_length = struct.unpack('!hh', data)
     data = response.read(headers_length)
     if len(data) < headers_length:
         response.status = 502
         response.fp = io.BytesIO(b'connection aborted. too short headers data=' + data)
+        response.read = response.fp.read
         return response
-    response.msg = httplib.HTTPMessage(io.BytesIO(zlib.decompress(data, -zlib.MAX_WBITS)))
+    if 'rc4' not in response.app_options:
+        response.msg = httplib.HTTPMessage(io.BytesIO(zlib.decompress(data, -zlib.MAX_WBITS)))
+    else:
+        response.msg = httplib.HTTPMessage(io.BytesIO(zlib.decompress(rc4crypt(data, kwargs.get('password')), -zlib.MAX_WBITS)))
+        if kwargs.get('password') and response.fp:
+            response.fp = RC4FileObject(response.fp, kwargs['password'])
     return response
 
 
@@ -1945,7 +2063,8 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             payload = self.rfile.read(content_length) if content_length else b''
             if common.HOSTS_MATCH and any(x(self.path) for x in common.HOSTS_MATCH):
-                realhost = next(common.HOSTS_MATCH[x] for x in common.HOSTS_MATCH if x(self.path)) or re.sub(r':\d+$', '', self.parsed_url.netloc)
+                realhosts = next(common.HOSTS_MATCH[x] for x in common.HOSTS_MATCH if x(self.path)) or re.sub(r':\d+$', '', self.parsed_url.netloc)
+                realhost = random.choice(realhosts.split('|'))
                 logging.debug('hosts pattern mathed, url=%r realhost=%r', self.path, realhost)
                 response = http_util.request(self.command, self.path, payload, self.headers, realhost=realhost, crlf=common.GAE_CRLF)
             else:
@@ -2124,9 +2243,9 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if common.HOSTS_CONNECT_MATCH and any(x(self.path) for x in common.HOSTS_CONNECT_MATCH):
             if host.endswith(common.GOOGLE_SITES) and not host.endswith(common.GOOGLE_WITHGAE):
                 http_util.dns.pop(host, None)
-            realhost = next(common.HOSTS_CONNECT_MATCH[x] for x in common.HOSTS_CONNECT_MATCH if x(self.path))
-            if realhost:
-                http_util.dns[host] = list(set(sum([socket.gethostbyname_ex(x)[-1] for x in realhost.split('|')], [])))
+            realhosts = next(common.HOSTS_CONNECT_MATCH[x] for x in common.HOSTS_CONNECT_MATCH if x(self.path))
+            if realhosts:
+                http_util.dns[host] = list(set(sum([socket.gethostbyname_ex(x)[-1] for x in realhosts.split('|')], [])))
             self.do_CONNECT_FWD()
         elif host.endswith(common.GOOGLE_SITES) and not host.endswith(common.GOOGLE_WITHGAE):
             http_util.dns[host] = common.GOOGLE_HOSTS
@@ -2642,6 +2761,9 @@ def pre_start():
                 #sys.exit(0)
     if common.GAE_APPIDS[0] == 'goagent':
         logging.critical('please edit %s to add your appid to [gae] !', common.CONFIG_FILENAME)
+        sys.exit(-1)
+    if common.GOOGLE_MODE == 'http' and common.GAE_PROFILE != 'google_ipv6' and common.GAE_PASSWORD == '':
+        logging.critical('to enable http mode, you should set [gae]password = <your_pass> and [gae]options = rc4', common.CONFIG_FILENAME)
         sys.exit(-1)
     if common.PAC_ENABLE:
         pac_ip = ProxyUtil.get_listen_ip() if common.PAC_IP in ('', '::', '0.0.0.0') else common.PAC_IP
