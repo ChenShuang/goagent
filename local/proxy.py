@@ -459,8 +459,8 @@ class ProxyUtil(object):
     def get_listen_ip():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-			sock.connect(('8.8.8.8', 53))
-			listen_ip = sock.getsockname()[0]
+            sock.connect(('8.8.8.8', 53))
+            listen_ip = sock.getsockname()[0]
         except Exception:
             listen_ip = '127.0.0.1'
         finally:
@@ -1707,7 +1707,7 @@ class RangeFetch(object):
             response_headers['Content-Range'] = 'bytes %s-%s/%s' % (start, end, length)
             response_headers['Content-Length'] = str(length-start)
 
-        logging.info('>>>>>>>>>>>>>>> RangeFetch started(%r) %d-%d', self.url, start, end)
+        logging.info('>>>> RangeFetch started(%r) %d-%d', self.url, start, end)
         self.wfile.write(('HTTP/1.1 %s\r\n%s\r\n' % (response_status, ''.join('%s: %s\r\n' % (k, v) for k, v in response_headers.items()))))
 
         data_queue = Queue.PriorityQueue()
@@ -1758,7 +1758,6 @@ class RangeFetch(object):
         self.lockobj.acquire()
         if (self.curThreads > self.minthreads):
             self.curThreads -= 1
-            logging.info('>>>>>>>>>>>>>>> [thread %s] finished. Total: %s thread(s)', threading.currentThread().ident, self.curThreads)
             self.lockobj.release()
             return True
         else:
@@ -1767,9 +1766,9 @@ class RangeFetch(object):
 
     def __add_thread(self, range_queue, data_queue):
         self.lockobj.acquire()
-        if (self.curThreads < max(self.threads, self.maxthreads * random.random())):
+        if (not range_queue.empty() and not self._stopped and self.curThreads < max(self.threads, self.maxthreads * random.random())):
             self.curThreads += 1
-            logging.info('>>>>>>>>>>>>>>> [thread %s] started. Total: %s thread(s)', thread.start_new_thread(self.__fetchlet, (range_queue, data_queue)), self.curThreads)
+            thread.start_new_thread(self.__fetchlet, (range_queue, data_queue))
         self.lockobj.release()
 
 
@@ -1793,6 +1792,8 @@ class RangeFetch(object):
                             time.sleep(5)
                         response = self.urlfetch(self.command, self.url, headers, self.payload, fetchserver, password=self.password)
                 except Queue.Empty:
+                    if (self.__finish_now()):
+                        return
                     continue
                 except Exception as e:
                     logging.warning("Response %r in __fetchlet", e)
@@ -1833,9 +1834,12 @@ class RangeFetch(object):
                             return
                         continue
                     content_length = int(response.getheader('Content-Length', 0))
-                    logging.info('>>>>>>>>>>>>>>> [thread %s] %s %s', threading.currentThread().ident, content_length, content_range)
+                    logging.info('>>>> [thread %s/%s] %s %s', threading.currentThread().ident, self.curThreads, content_length, content_range)
                     while 1:
                         try:
+                            if self._stopped:
+                                response.close()
+                                return
                             data = response.read(self.bufsize)
                             if not data:
                                 break
