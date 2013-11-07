@@ -1775,6 +1775,9 @@ class RangeFetch(object):
                     logging.info('>>>>>>>>>>>>>>> [thread %s] %s %s', threading.currentThread().ident, content_length, content_range)
                     while 1:
                         try:
+                            if self._stopped:
+                                response.close()
+                                return
                             data = response.read(self.bufsize)
                             if not data:
                                 break
