@@ -148,7 +148,6 @@ class Logging(type(sys)):
 
     def exception(self, fmt, *args, **kwargs):
         self.error(fmt, *args, **kwargs)
-#        traceback.print_exc(file=sys.stderr)
 
     def critical(self, fmt, *args, **kwargs):
         self.__set_error_color()
@@ -868,6 +867,10 @@ class HTTPUtil(object):
         self.proxy = proxy
         self.ssl_validate = ssl_validate or self.ssl_validate
         self.ssl_obfuscate = ssl_obfuscate or self.ssl_obfuscate
+        self.mindelay = 0
+        self.ssl_mindelay = 0
+        self.queobj = Queue.Queue();
+        self.ssl_queobj = Queue.Queue();
         if self.ssl_validate or self.ssl_obfuscate:
             self.ssl_context = OpenSSL.SSL.Context(OpenSSL.SSL.TLSv1_METHOD)
             self.ssl_context.set_session_id(binascii.b2a_hex(os.urandom(10)))
@@ -914,6 +917,7 @@ class HTTPUtil(object):
         def _create_connection(address, timeout, queobj):
             sock = None
             try:
+                _address = address;
                 address = (self.dns_resolve(address[0])[0],) + address[1:];
                 # create a ipv4/ipv6 socket object
                 sock = socket.socket(socket.AF_INET if ':' not in address[0] else socket.AF_INET6)
@@ -930,24 +934,51 @@ class HTTPUtil(object):
                 # TCP connect
                 sock.connect(address)
                 # record TCP connection time
-                self.tcp_connection_time[address] = time.time() - start_time
+                self.tcp_connection_time[_address] = time.time() - start_time
                 # put ssl socket object to output queobj
-                queobj.put(sock)
+                queobj.put([time.time(), _address, sock]);
             except (socket.error, ssl.SSLError, OSError) as e:
                 # any socket.error, put Excpetions to output queobj.
-                queobj.put(e)
+                queobj.put([time.time(), _address, e]);
                 # reset a large and random timeout to the address
-                self.tcp_connection_time[address] = self.max_timeout+random.random()
+                self.tcp_connection_time[_address] = self.max_timeout+random.random()
                 # close tcp socket
                 if sock:
                     sock.close()
 
         def _close_connection(count, queobj):
             for _ in range(count):
-                queobj.get()
+                val = queobj.get()
+                if not isinstance(val[2], (socket.error, OSError)):
+                    self.queobj.put(val)
+        def get_queue_sock(addresses):
+            ret = None;
+            locque = Queue.Queue();
+            try:
+                while not self.queobj.empty():
+                    t, address, sock = self.queobj.get(False);
+                    if time.time() - t > 30 or self.tcp_connection_time[address] > self.mindelay * 1.5:
+                        try:
+                            sock.close()
+                        except:
+                            pass
+                        continue
+                    if address in addresses:
+                        ret = sock;
+                        break;
+                    else:
+                        locque.put([t, address, sock]);
+            except Exception as e:
+                ret = None;
+            while not locque.empty():
+                self.queobj.put(locque.get())
+            return ret
         host, port = address
         result = None
         addresses = [(x, port) for x in self.dns_resolve(host)]
+        sock = get_queue_sock(addresses);
+        if sock:
+            return sock;
         if port == 443:
             get_connection_time = lambda addr: self.ssl_connection_time.__getitem__(addr) or self.tcp_connection_time.__getitem__(addr)
         else:
@@ -961,9 +992,10 @@ class HTTPUtil(object):
                 thread.start_new_thread(_create_connection, (addr, timeout, queobj))
             for i in range(len(addrs)):
                 result = queobj.get()
-                if not isinstance(result, (socket.error, OSError)):
+                if not isinstance(result[2], (socket.error, OSError)):
                     thread.start_new_thread(_close_connection, (len(addrs)-i-1, queobj))
-                    return result
+                    self.mindelay = self.tcp_connection_time[result[1]]
+                    return result[2]
                 else:
                     if i == 0:
                         # only output first error
@@ -974,6 +1006,7 @@ class HTTPUtil(object):
             sock = None
             ssl_sock = None
             try:
+                _address = ipaddr
                 ipaddr = (self.dns_resolve(ipaddr[0])[0],) + ipaddr[1:];
                 # create a ipv4/ipv6 socket object
                 sock = socket.socket(socket.AF_INET if ':' not in ipaddr[0] else socket.AF_INET6)
@@ -1009,12 +1042,12 @@ class HTTPUtil(object):
                     if '.google' not in commonname and not commonname.endswith('.appspot.com'):
                         raise ssl.SSLError("Host name '%s' doesn't match certificate host '%s'" % (address[0], commonname))
                 # put ssl socket object to output queobj
-                queobj.put(ssl_sock)
+                queobj.put([time.time(), _address, ssl_sock]);
             except (socket.error, ssl.SSLError, OSError) as e:
                 # any socket.error, put Excpetions to output queobj.
-                queobj.put(e)
+                queobj.put([time.time(), _address, e]);
                 # reset a large and random timeout to the ipaddr
-                self.ssl_connection_time[ipaddr] = self.max_timeout + random.random()
+                self.ssl_connection_time[_address] = self.max_timeout + random.random()
                 # close ssl socket
                 if ssl_sock:
                     ssl_sock.close()
@@ -1077,11 +1110,39 @@ class HTTPUtil(object):
                     sock.close()
         def _close_ssl_connection(count, queobj):
             for _ in range(count):
-                queobj.get()
+                val = queobj.get()
+                if not isinstance(val[2], (socket.error, OSError)):
+                    self.ssl_queobj.put(val)
+        def get_queue_sock(addresses):
+            ret = None;
+            locque = Queue.Queue();
+            try:
+                while not self.ssl_queobj.empty():
+                    t, address, sock = self.ssl_queobj.get(False);
+                    if time.time() - t > 30 or self.ssl_connection_time[address] > self.ssl_mindelay * 1.5:
+                        try:
+                            sock.close()
+                        except:
+                            pass
+                        continue
+                    if address in addresses:
+                        ret = sock;
+                        break;
+                    else:
+                        locque.put([t, address, sock]);
+            except Exception as e:
+                ret = None;
+            while not locque.empty():
+                self.ssl_queobj.put(locque.get())
+            return ret
+ 
         host, port = address
         result = None
         create_connection = _create_ssl_connection if not self.ssl_obfuscate and not self.ssl_validate else _create_openssl_connection
         addresses = [(x, port) for x in self.dns_resolve(host)]
+        sock = get_queue_sock(addresses);
+        if sock:
+            return sock;
         for i in range(self.max_retry):
             window = min((self.max_window+1)//2 + i, len(addresses))
             addresses.sort(key=self.ssl_connection_time.__getitem__)
@@ -1091,9 +1152,10 @@ class HTTPUtil(object):
                 thread.start_new_thread(create_connection, (addr, timeout, queobj))
             for i in range(len(addrs)):
                 result = queobj.get()
-                if not isinstance(result, Exception):
+                if not isinstance(result[2], Exception):
                     thread.start_new_thread(_close_ssl_connection, (len(addrs)-i-1, queobj))
-                    return result
+                    self.ssl_mindelay = self.tcp_connection_time[result[1]]
+                    return result[2]
                 else:
                     if i == 0:
                         # only output first error
@@ -2824,6 +2886,11 @@ def main():
     
     server = LocalProxyServer((common.LISTEN_IP, common.LISTEN_PORT), GAEProxyHandler)
     server.serve_forever()
+
+import signal
+def SIGINT_Handler(signum, frame):
+    os._exit(0);
+signal.signal(signal.SIGINT, SIGINT_Handler);
 
 if __name__ == '__main__':
     main()
