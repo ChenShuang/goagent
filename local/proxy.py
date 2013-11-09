@@ -892,7 +892,7 @@ class HTTPUtil(object):
             else:
                 iplist = DNSUtil.remote_resolve(dnsserver, host, timeout=2)
             if not iplist:
-                iplist = DNSUtil.remote_resolve('8.8.8.8', host, timeout=2)
+                iplist = DNSUtil.remote_resolve('8.8.4.4', host, timeout=2)
             if ipv4_only:
                 iplist = [ip for ip in iplist if re.match(r'\d+\.\d+\.\d+\.\d+', ip)]
             self.dns[host] = iplist = list(set(iplist))
@@ -1852,10 +1852,10 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 else:
                     google_ipmap[domain] = [domain]
             google_iplist = list(set(sum(list(google_ipmap.values()), [])))
-            if len(google_iplist) < 10 or len(set(x.split('.', 1)[0] for x in google_iplist)) == 1:
+            if len(google_iplist) < 20 or len(set(x.split('.', 1)[0] for x in google_iplist)) == 1:
                 logging.warning('local google_iplist=%s is too short, try remote_resolve', google_iplist)
                 need_resolve_remote += list(common.GOOGLE_HOSTS)
-            for dnsserver in ('8.8.8.8', '8.8.4.4', '114.114.114.114', '114.114.115.115'):
+            for dnsserver in ('8.8.4.4', '168.95.1.1', '114.114.114.114', '114.114.115.115'):
                 for domain in need_resolve_remote:
                     logging.info('resolve remote domain=%r from dnsserver=%r', domain, dnsserver)
                     try:
@@ -2596,7 +2596,7 @@ def pre_start():
         logging.critical('please edit %s to add your appid to [gae] !', common.CONFIG_FILENAME)
         sys.exit(-1)
     if common.GOOGLE_MODE == 'http' and common.GAE_PROFILE != 'google_ipv6' and common.GAE_PASSWORD == '':
-        logging.critical('to enable http mode, you should set [gae]password = <your_pass> and [gae]options = rc4', common.CONFIG_FILENAME)
+        logging.critical('to enable http mode, you should set %r [gae]password = <your_pass> and [gae]options = rc4', common.CONFIG_FILENAME)
         sys.exit(-1)
     if common.PAC_ENABLE:
         pac_ip = ProxyUtil.get_listen_ip() if common.PAC_IP in ('', '::', '0.0.0.0') else common.PAC_IP
