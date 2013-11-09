@@ -907,7 +907,7 @@ class HTTPUtil(object):
             else:
                 iplist = DNSUtil.remote_resolve(dnsserver, host, timeout=2)
             if not iplist:
-                iplist = DNSUtil.remote_resolve('8.8.8.8', host, timeout=2)
+                iplist = DNSUtil.remote_resolve('8.8.4.4', host, timeout=2)
             if ipv4_only:
                 iplist = [ip for ip in iplist if re.match(r'\d+\.\d+\.\d+\.\d+', ip)]
             self.dns[host] = iplist = list(set(iplist))
@@ -1584,30 +1584,8 @@ def response_replace_header(response, name, value):
         response.header.replace_header(name, value)
 
 
-def rc4crypt(data, key):
-    """RC4 algorithm"""
-    if not key or not data:
-        return data
-    x = 0
-    box = range(256)
-    for i, y in enumerate(box):
-        x = (x + y + ord(key[i % len(key)])) & 0xff
-        box[i], box[x] = box[x], y
-    x = y = 0
-    out = []
-    out_append = out.append
-    for char in data:
-        x = (x + 1) & 0xff
-        y = (y + box[x]) & 0xff
-        box[x], box[y] = box[y], box[x]
-        out_append(chr(ord(char) ^ box[(box[x] + box[y]) & 0xff]))
-    return ''.join(out)
-
-
-class RC4FileObject(object):
-    """fileobj for rc4"""
-    def __init__(self, stream, key):
-        self.__stream = stream
+class rc4crypt_new(object):
+    def __init__(self, key):
         x = 0
         box = range(256)
         for i, y in enumerate(box):
@@ -1616,18 +1594,12 @@ class RC4FileObject(object):
         self.__box = box
         self.__x = 0
         self.__y = 0
-
-    def __getattr__(self, attr):
-        if attr not in ('__stream', '__box', '__x', '__y'):
-            return getattr(self.__stream, attr)
-
-    def read(self, size=-1):
+    def encrypt(self, data):
         out = []
         out_append = out.append
         x = self.__x
         y = self.__y
         box = self.__box
-        data = self.__stream.read(size)
         for char in data:
             x = (x + 1) & 0xff
             y = (y + box[x]) & 0xff
@@ -1638,22 +1610,28 @@ class RC4FileObject(object):
         return ''.join(out)
 
 
+def rc4crypt(data, key):
+    if not key or not data:
+        return data
+    return rc4crypt_new(key).encrypt(data)
+
+
 try:
-    import Crypto.Cipher.ARC4
-    def rc4crypt(data, key):
-        return Crypto.Cipher.ARC4.new(key).encrypt(data)
-    class RC4FileObject(object):
-        """fileobj for rc4"""
-        def __init__(self, stream, key):
-            self.__stream = stream
-            self.__cipher = Crypto.Cipher.ARC4.new(key)
-        def __getattr__(self, attr):
-            if attr not in ('__stream', '__cipher'):
-                return getattr(self.__stream, attr)
-        def read(self, size=-1):
-            return self.__cipher.encrypt(self.__stream.read(size))
+    from Crypto.Cipher._ARC4 import new as rc4crypt_new
 except ImportError:
     pass
+
+
+class RC4FileObject(object):
+    """fileobj for rc4"""
+    def __init__(self, stream, cipher):
+        self.__stream = stream
+        self.__cipher = cipher
+    def __getattr__(self, attr):
+        if attr not in ('__stream', '__cipher'):
+            return getattr(self.__stream, attr)
+    def read(self, size=-1):
+        return self.__cipher.encrypt(self.__stream.read(size))
 
 
 def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
@@ -1674,11 +1652,18 @@ def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
     # prepare GAE request
     request_method = 'POST'
     request_headers = {}
+
+    random_string = None
+    rc4obj = None
+    if 'rc4' in common.GAE_OPTIONS:
+        random_string = "".join([chr(random.randint(0, 255)) for i in range(0, 20)])
+        rc4obj = rc4crypt_new(hashlib.sha1(kwargs.get('password') + random_string).digest())
+
     if common.GAE_OBFUSCATE:
         if 'rc4' in common.GAE_OPTIONS:
             request_headers['X-GOA-Options'] = 'rc4'
-            cookie = base64.b64encode(rc4crypt(zlib.compress(metadata)[2:-4], kwargs.get('password'))).strip()
-            payload = rc4crypt(payload, kwargs.get('password'))
+            cookie = base64.b64encode(rc4obj.encrypt(zlib.compress(metadata)[2:-4])).strip()
+            payload = rc4obj.encrypt(payload)
         else:
             cookie = base64.b64encode(zlib.compress(metadata)[2:-4]).strip()
         request_headers['Cookie'] = cookie
@@ -1687,13 +1672,18 @@ def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
         else:
             request_method = 'GET'
     else:
+        metadata = zlib.compress(metadata)[2:-4]
         if 'rc4' in common.GAE_OPTIONS:
             request_headers['X-GOA-Options'] = 'rc4'
-            metadata = rc4crypt(metadata, kwargs.get('password'))
-            payload = rc4crypt(payload, kwargs.get('password'))
-        metadata = zlib.compress(metadata)[2:-4]
+            metadata = rc4obj.encrypt(metadata)
+            payload = rc4obj.encrypt(payload)
         payload = '%s%s%s' % (struct.pack('!h', len(metadata)), metadata, payload)
         request_headers['Content-Length'] = str(len(payload))
+    
+    if 'rc4' in common.GAE_OPTIONS:
+        payload = random_string + payload
+        request_headers['Content-Length'] = str(len(payload))
+
     # post data
     need_crlf = 0 if common.GOOGLE_MODE == 'https' else common.GAE_CRLF
     response = http_util.request(request_method, fetchserver, payload, request_headers, crlf=need_crlf)
@@ -1720,9 +1710,9 @@ def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
     if 'rc4' not in response.app_options:
         response.msg = httplib.HTTPMessage(io.BytesIO(zlib.decompress(data, -zlib.MAX_WBITS)))
     else:
-        response.msg = httplib.HTTPMessage(io.BytesIO(zlib.decompress(rc4crypt(data, kwargs.get('password')), -zlib.MAX_WBITS)))
+        response.msg = httplib.HTTPMessage(io.BytesIO(zlib.decompress(rc4obj.encrypt(data), -zlib.MAX_WBITS)))
         if kwargs.get('password') and response.fp:
-            response.fp = RC4FileObject(response.fp, kwargs['password'])
+            response.fp = RC4FileObject(response.fp, rc4obj)
     return response
 
 
@@ -1981,10 +1971,10 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 else:
                     google_ipmap[domain] = [domain]
             google_iplist = list(set(sum(list(google_ipmap.values()), [])))
-            if len(google_iplist) < 10 or len(set(x.split('.', 1)[0] for x in google_iplist)) == 1:
+            if len(google_iplist) < 20 or len(set(x.split('.', 1)[0] for x in google_iplist)) == 1:
                 logging.warning('local google_iplist=%s is too short, try remote_resolve', google_iplist)
                 need_resolve_remote += list(common.GOOGLE_HOSTS)
-            for dnsserver in ('8.8.8.8', '8.8.4.4', '114.114.114.114', '114.114.115.115'):
+            for dnsserver in ('8.8.4.4', '168.95.1.1', '114.114.114.114', '114.114.115.115'):
                 for domain in need_resolve_remote:
                     logging.info('resolve remote domain=%r from dnsserver=%r', domain, dnsserver)
                     try:
@@ -2829,7 +2819,7 @@ def pre_start():
         logging.critical('please edit %s to add your appid to [gae] !', common.CONFIG_FILENAME)
         sys.exit(-1)
     if common.GOOGLE_MODE == 'http' and common.GAE_PROFILE != 'google_ipv6' and common.GAE_PASSWORD == '':
-        logging.critical('to enable http mode, you should set [gae]password = <your_pass> and [gae]options = rc4', common.CONFIG_FILENAME)
+        logging.critical('to enable http mode, you should set %r [gae]password = <your_pass> and [gae]options = rc4', common.CONFIG_FILENAME)
         sys.exit(-1)
     if common.PAC_ENABLE:
         pac_ip = ProxyUtil.get_listen_ip() if common.PAC_IP in ('', '::', '0.0.0.0') else common.PAC_IP

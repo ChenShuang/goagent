@@ -13,6 +13,7 @@ import re
 import time
 import struct
 import zlib
+import hashlib
 import base64
 import logging
 import httplib
@@ -82,30 +83,8 @@ def message_html(title, banner, detail=''):
     return string.Template(MESSAGE_TEMPLATE).substitute(title=title, banner=banner, detail=detail)
 
 
-def rc4crypt(data, key):
-    """RC4 algorithm"""
-    if not key or not data:
-        return data
-    x = 0
-    box = range(256)
-    for i, y in enumerate(box):
-        x = (x + y + ord(key[i % len(key)])) & 0xff
-        box[i], box[x] = box[x], y
-    x = y = 0
-    out = []
-    out_append = out.append
-    for char in data:
-        x = (x + 1) & 0xff
-        y = (y + box[x]) & 0xff
-        box[x], box[y] = box[y], box[x]
-        out_append(chr(ord(char) ^ box[(box[x] + box[y]) & 0xff]))
-    return ''.join(out)
-
-
-class RC4FileObject(object):
-    """fileobj for rc4"""
-    def __init__(self, stream, key):
-        self.__stream = stream
+class rc4crypt_new(object):
+    def __init__(self, key):
         x = 0
         box = range(256)
         for i, y in enumerate(box):
@@ -114,18 +93,12 @@ class RC4FileObject(object):
         self.__box = box
         self.__x = 0
         self.__y = 0
-
-    def __getattr__(self, attr):
-        if attr not in ('__stream', '__box', '__x', '__y'):
-            return getattr(self.__stream, attr)
-
-    def read(self, size=-1):
+    def encrypt(self, data):
         out = []
         out_append = out.append
         x = self.__x
         y = self.__y
         box = self.__box
-        data = self.__stream.read(size)
         for char in data:
             x = (x + 1) & 0xff
             y = (y + box[x]) & 0xff
@@ -136,23 +109,28 @@ class RC4FileObject(object):
         return ''.join(out)
 
 
+def rc4crypt(data, key):
+    if not key or not data:
+        return data
+    return rc4crypt_new(key).encrypt(data)
+
+
 try:
-    import Crypto.Cipher.ARC4
-    def rc4crypt(data, key):
-        return Crypto.Cipher.ARC4.new(key).encrypt(data)
-    class RC4FileObject(object):
-        """fileobj for rc4"""
-        def __init__(self, stream, key):
-            self.__stream = stream
-            self.__cipher = Crypto.Cipher.ARC4.new(key)
-        def __getattr__(self, attr):
-            if attr not in ('__stream', '__cipher'):
-                return getattr(self.__stream, attr)
-        def read(self, size=-1):
-            return self.__cipher.encrypt(self.__stream.read(size))
+    from Crypto.Cipher._ARC4 import new as rc4crypt_new
 except ImportError:
     pass
 
+
+class RC4FileObject(object):
+    """fileobj for rc4"""
+    def __init__(self, stream, cipher):
+        self.__stream = stream
+        self.__cipher = cipher
+    def __getattr__(self, attr):
+        if attr not in ('__stream', '__cipher'):
+            return getattr(self.__stream, attr)
+    def read(self, size=-1):
+        return self.__cipher.encrypt(self.__stream.read(size))
 
 def gae_application(environ, start_response):
     cookie = environ.get('HTTP_COOKIE', '')
@@ -172,21 +150,27 @@ def gae_application(environ, start_response):
     # inflate = lambda x:zlib.decompress(x, -zlib.MAX_WBITS)
     wsgi_input = environ['wsgi.input']
     input_data = wsgi_input.read()
+
+    rc4obj = None
+    if 'rc4' in options:
+        rc4obj = rc4crypt_new(hashlib.sha1(__password__ + input_data[:20]).digest())
+        input_data = input_data[20:]
+
     if cookie:
         if 'rc4' not in options:
             metadata = zlib.decompress(base64.b64decode(cookie), -zlib.MAX_WBITS)
             payload = input_data or ''
         else:
-            metadata = zlib.decompress(rc4crypt(base64.b64decode(cookie), __password__), -zlib.MAX_WBITS)
-            payload = rc4crypt(input_data, __password__) if input_data else ''
+            metadata = zlib.decompress(rc4obj.encrypt(base64.b64decode(cookie)), -zlib.MAX_WBITS)
+            payload = rc4obj.encrypt(input_data) if input_data else ''
     else:
         metadata_length, = struct.unpack('!h', input_data[:2])
         if 'rc4' not in options:
             metadata = zlib.decompress(input_data[2:2+metadata_length], -zlib.MAX_WBITS)
             payload = input_data[2+metadata_length:]
         else:
-            metadata = rc4crypt(zlib.decompress(input_data[2:2+metadata_length], -zlib.MAX_WBITS), __password__)
-            payload = rc4crypt(input_data[2+metadata_length:], __password__)
+            metadata = zlib.decompress(rc4obj.encrypt(input_data[2:2+metadata_length]), -zlib.MAX_WBITS)
+            payload = rc4obj.encrypt(input_data[2+metadata_length:])
 
     try:
         headers = dict(x.split(':', 1) for x in metadata.splitlines() if x)
@@ -310,8 +294,8 @@ def gae_application(environ, start_response):
     else:
         start_response('200 OK', [('Content-Type', 'image/gif'), ('X-GOA-Options', 'rc4')])
         yield struct.pack('!hh', int(response.status_code), len(response_headers_data))
-        yield rc4crypt(response_headers_data, __password__)
-        yield rc4crypt(data, __password__)
+        yield rc4obj.encrypt(response_headers_data)
+        yield rc4obj.encrypt(data)
 
 
 class LegacyHandler(object):
