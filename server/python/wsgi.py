@@ -185,7 +185,7 @@ def gae_application(environ, start_response):
             metadata = zlib.decompress(input_data[2:2+metadata_length], -zlib.MAX_WBITS)
             payload = input_data[2+metadata_length:]
         else:
-            metadata = rc4crypt(zlib.decompress(input_data[2:2+metadata_length], -zlib.MAX_WBITS), __password__)
+            metadata = zlib.decompress(rc4crypt(input_data[2:2+metadata_length], __password__), -zlib.MAX_WBITS)
             payload = rc4crypt(input_data[2+metadata_length:], __password__)
 
     try:

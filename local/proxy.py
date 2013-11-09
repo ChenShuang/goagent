@@ -1597,11 +1597,11 @@ def gae_urlfetch(method, url, headers, payload, fetchserver, **kwargs):
         else:
             request_method = 'GET'
     else:
+        metadata = zlib.compress(metadata)[2:-4]
         if 'rc4' in common.GAE_OPTIONS:
             request_headers['X-GOA-Options'] = 'rc4'
             metadata = rc4crypt(metadata, kwargs.get('password'))
             payload = rc4crypt(payload, kwargs.get('password'))
-        metadata = zlib.compress(metadata)[2:-4]
         payload = '%s%s%s' % (struct.pack('!h', len(metadata)), metadata, payload)
         request_headers['Content-Length'] = str(len(payload))
     # post data
