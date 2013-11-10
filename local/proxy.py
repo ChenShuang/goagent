@@ -468,6 +468,17 @@ class ProxyUtil(object):
                 sock.close()
         return listen_ip
 
+    @staticmethod
+    def check_address(address):
+        if common.LISTEN_IPFILTER.match(address):
+            return True
+        else:
+            logging.warn('REFUSE IP: %s', address)
+            return False
+
+
+
+
 
 class PacUtil(object):
     """GoAgent Pac Util"""
@@ -475,8 +486,8 @@ class PacUtil(object):
     @staticmethod
     def update_pacfile(filename):
         listen_ip = ProxyUtil.get_listen_ip() if common.LISTEN_IP in ('', '::', '0.0.0.0') else common.LISTEN_IP
-        autoproxy = '127.0.0.1:%s' % (common.LISTEN_PORT)
-        blackhole = '127.0.0.1:%s' % (common.PAC_PORT)
+        autoproxy = '127.0.0.1:8087'
+        blackhole = '127.0.0.1:8086'
         default = '%s:%s' % (common.PROXY_HOST, common.PROXY_PORT) if common.PROXY_ENABLE else 'DIRECT'
         opener = urllib2.build_opener(urllib2.ProxyHandler({'http': autoproxy, 'https': autoproxy}))
         content = ''
@@ -1400,6 +1411,7 @@ class Common(object):
         self.LISTEN_PORT = self.CONFIG.getint('listen', 'port')
         self.LISTEN_VISIBLE = self.CONFIG.getint('listen', 'visible')
         self.LISTEN_DEBUGINFO = self.CONFIG.getint('listen', 'debuginfo') if self.CONFIG.has_option('listen', 'debuginfo') else 0
+        self.LISTEN_IPFILTER = re.compile((self.CONFIG.get('listen', 'ipfilter') if self.CONFIG.has_option('listen', 'ipfilter') else "*").replace('.', '\.').replace('*', '.*').replace('?', '.'))
 
         self.GAE_APPIDS = re.findall(r'[\w\-\.]+', self.CONFIG.get('gae', 'appid').replace('.appspot.com', ''))
         self.GAE_PASSWORD = self.CONFIG.get('gae', 'password').strip()
@@ -2080,6 +2092,8 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         return '%s:%s' % self.client_address[:2]
 
     def do_METHOD(self):
+        if not ProxyUtil.check_address(self.client_address[0]):
+            return 
         if HAS_PYPY:
             self.path = re.sub(r'(://[^/]+):\d+/', '\\1/', self.path)
         host = self.headers.get('Host', '')
@@ -2299,6 +2313,8 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         """handle CONNECT cmmand, socket forward or deploy a fake cert"""
+        if not ProxyUtil.check_address(self.client_address[0]):
+            return 
         host, _, port = self.path.rpartition(':')
         if common.HOSTS_CONNECT_MATCH and any(x(self.path) for x in common.HOSTS_CONNECT_MATCH):
             if host.endswith(common.GOOGLE_SITES) and not host.endswith(common.GOOGLE_WITHGAE):
@@ -2493,6 +2509,8 @@ class PAASProxyHandler(GAEProxyHandler):
         self.setup()
 
     def do_METHOD(self):
+        if not ProxyUtil.check_address(self.client_address[0]):
+            return 
         try:
             headers = dict((k.title(), v) for k, v in self.headers.items())
             host = headers.get('Host', '')
@@ -2585,6 +2603,8 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         return (soc, True)
 
     def do_CONNECT(self):
+        if not ProxyUtil.check_address(self.client_address[0]):
+            return 
         (soc, success) = self._connect_to(self.path)
         try:
             if success:
@@ -2599,6 +2619,8 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             self.connection.close()
 
     def do_GET(self):
+        if not ProxyUtil.check_address(self.client_address[0]):
+            return 
         (scm, netloc, path, params, query, fragment) = urlparse.urlparse(
             self.path, 'http')
         if scm != 'http' or fragment or not netloc:
@@ -2691,6 +2713,8 @@ class PACServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if data:
             if filename.endswith('.pac'):
                 data = re.sub(r"127\.0\.0\.1", ProxyUtil.get_listen_ip() if common.LISTEN_IP in ('', '::', '0.0.0.0') else common.LISTEN_IP, data)
+                data = re.sub(r":8087", ":" + str(common.LISTEN_PORT), data);
+                data = re.sub(r":8086", ":" + str(common.PAC_PORT), data);
             self.wfile.write(('HTTP/1.1 200\r\nContent-Type: %s\r\nContent-Length: %s\r\n\r\n' % (mimetype, len(data))).encode())
             self.wfile.write(data)
 
