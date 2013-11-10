@@ -1765,8 +1765,11 @@ class RangeFetch(object):
         data_queue = Queue.PriorityQueue()
         range_queue = Queue.PriorityQueue()
         range_queue.put((start, end, self.response))
-        for begin in range(end+1, length, self.maxsize):
-            range_queue.put((begin, min(begin+self.maxsize-1, length-1), None))
+        wait_length = min(length, self.maxsize * 2)
+        for begin in range(end+1, wait_length, self.waitsize):
+            range_queue.put((begin, min(begin+self.waitsize, wait_length)-1, None))
+        for begin in range(wait_length, length, self.maxsize):
+            range_queue.put((begin, min(begin+self.maxsize, length)-1, None))
         self.curThreads = self.threads
         [thread.start_new_thread(self.__fetchlet, (range_queue, data_queue)) for _ in range(self.curThreads)]
         has_peek = hasattr(data_queue, 'peek')
@@ -2158,13 +2161,13 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if 'Range' in request_headers:
             m = re.search('bytes=(\d+)-', request_headers['Range'])
             start = int(m.group(1) if m else 0)
-            request_headers['Range'] = 'bytes=%d-%d' % (start, start+common.AUTORANGE_MAXSIZE-1)
+            request_headers['Range'] = 'bytes=%d-%d' % (start, start+common.AUTORANGE_WAITSIZE-1)
             logging.info('autorange range=%r match url=%r', request_headers['Range'], self.path)
         elif not range_in_query and special_range:
             logging.info('Found [autorange]endswith match url=%r', self.path)
             m = re.search('bytes=(\d+)-', request_headers.get('Range', ''))
             start = int(m.group(1) if m else 0)
-            request_headers['Range'] = 'bytes=%d-%d' % (start, start+common.AUTORANGE_MAXSIZE-1)
+            request_headers['Range'] = 'bytes=%d-%d' % (start, start+common.AUTORANGE_WAITSIZE-1)
 
         payload = b''
         if 'Content-Length' in request_headers:
