@@ -909,7 +909,7 @@ class HTTPUtil(object):
             if not iplist:
                 iplist = DNSUtil.remote_resolve('8.8.4.4', host, timeout=2)
             if ipv4_only:
-                iplist = [ip for ip in iplist if re.match(r'\d+\.\d+\.\d+\.\d+', ip)]
+                iplist = [ip for ip in iplist if self.re_ipv4.match(ip)]
             self.dns[host] = iplist = list(set(iplist))
         return iplist
 
@@ -1335,7 +1335,7 @@ class HTTPUtil(object):
 
     def request(self, method, url, payload=None, headers={}, realhost='', fullurl=False, bufsize=8192, crlf=None, return_sock=None):
         scheme, netloc, path, _, query, _ = urlparse.urlparse(url)
-        if netloc.rfind(':') <= netloc.rfind(']'):
+        if HTTPUtil.re_ipv6.match(netloc) or netloc.rfind(':') <= netloc.rfind(']'):
             # no port number
             host = netloc
             port = 443 if scheme == 'https' else 80
@@ -1617,7 +1617,7 @@ def rc4crypt(data, key):
 
 
 try:
-    from Crypto.Cipher._ARC4 import new as rc4crypt_new
+    from Crypto.Cipher.ARC4 import new as rc4crypt_new
 except ImportError:
     pass
 
@@ -1971,7 +1971,7 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 else:
                     google_ipmap[domain] = [domain]
             google_iplist = list(set(sum(list(google_ipmap.values()), [])))
-            if len(google_iplist) < 20 or len(set(x.split('.', 1)[0] for x in google_iplist)) == 1:
+            if len(google_iplist) < 10 or len(set(x.split('.', 1)[0] for x in google_iplist)) == 1:
                 logging.warning('local google_iplist=%s is too short, try remote_resolve', google_iplist)
                 need_resolve_remote += list(common.GOOGLE_HOSTS)
             for dnsserver in ('8.8.4.4', '168.95.1.1', '114.114.114.114', '114.114.115.115'):
@@ -2194,7 +2194,7 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     return
                 # gateway error, switch to https mode
                 if response.app_status in (400, 504) or (response.app_status == 502 and common.GAE_PROFILE == 'google_cn'):
-                    common.GOOGLE_MODE = 'https'
+#                    common.GOOGLE_MODE = 'https'
                     common.GAE_FETCHSERVER = '%s://%s.appspot.com%s?' % (common.GOOGLE_MODE, common.GAE_APPIDS[0], common.GAE_PATH)
                     continue
                 # appid not exists, try remove it from appid
@@ -2280,7 +2280,7 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     logging.debug('GAEProxyHandler.do_METHOD_GAE return %r', e)
                 elif e.args[0] in (errno.ECONNRESET, errno.ETIMEDOUT, errno.ENETUNREACH, 11004):
                     # connection reset or timeout, switch to https
-                    common.GOOGLE_MODE = 'https'
+#                    common.GOOGLE_MODE = 'https'
                     common.GAE_FETCHSERVER = '%s://%s.appspot.com%s?' % (common.GOOGLE_MODE, common.GAE_APPIDS[0], common.GAE_PATH)
                 elif e.args[0] == errno.ETIMEDOUT or isinstance(e.args[0], str) and 'timed out' in e.args[0]:
                     if content_length and accept_ranges == 'bytes':
@@ -2301,7 +2301,7 @@ class GAEProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 http_util.dns.pop(host, None)
             realhosts = next(common.HOSTS_CONNECT_MATCH[x] for x in common.HOSTS_CONNECT_MATCH if x(self.path))
             if realhosts:
-                http_util.dns[host] = list(set(sum([socket.gethostbyname_ex(x)[-1] for x in realhosts.split('|')], [])))
+                http_util.dns[host] = list(set(sum([http_util.dns_resolve(x) for x in realhosts.split('|')], [])))
             self.do_CONNECT_FWD()
         elif host.endswith(common.GOOGLE_SITES) and not host.endswith(common.GOOGLE_WITHGAE):
             http_util.dns[host] = common.GOOGLE_HOSTS
@@ -2581,7 +2581,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         return (soc, True)
 
     def do_CONNECT(self):
-        (soc, success) = self._connect_to(self.path);
+        (soc, success) = self._connect_to(self.path)
         try:
             if success:
                 self.log_request(200)
@@ -2600,7 +2600,7 @@ class LocalProxyHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if scm != 'http' or fragment or not netloc:
             self.send_error(400, "bad url %s" % self.path)
             return
-        (soc, success) = self._connect_to(netloc);
+        (soc, success) = self._connect_to(netloc)
         try:
             if success:
                 self.log_request()
