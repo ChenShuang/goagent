@@ -3,7 +3,7 @@
 # Contributor:
 #      Phus Lu        <phus.lu@gmail.com>
 
-__version__ = '3.0.6'
+__version__ = '3.0.7'
 __password__ = ''
 __hostsdeny__ = ()  # __hostsdeny__ = ('.youtube.com', '.youku.com')
 
@@ -179,7 +179,7 @@ def gae_application(environ, start_response):
     except (zlib.error, KeyError, ValueError):
         import traceback
         start_response('500 Internal Server Error', [('Content-Type', 'text/html')])
-        yield message_html('500 Internal Server Error', 'Bad Request(metadata), Password maybe is wrong', '<pre>%s</pre>' % traceback.format_exc())
+        yield message_html('500 Internal Server Error', 'Bad Request (metadata) - Possible Wrong Password', '<pre>%s</pre>' % traceback.format_exc())
         raise StopIteration
 
     kwargs = {}

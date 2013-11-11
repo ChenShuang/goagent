@@ -22,15 +22,18 @@ PACKAGE_NAME=goagent
 PACKAGE_DESC="goagent proxy server"
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin:${PATH}
 
+# Choose python version.
+py=python2.7
+
 start() {
-    echo -n "Starting ${PACKAGE_DESC}: "
-    nohup /usr/bin/env python2.7 proxy.py > /dev/null 2>&1 &
+    echo "Starting ${PACKAGE_DESC}: "
+    nohup /usr/bin/env $py proxy.py > /dev/null 2>&1 &
     echo $! > ${PACKAGE_NAME}.pid
     echo "${PACKAGE_NAME}."
 }
 
 stop() {
-    echo -n "Stopping ${PACKAGE_DESC}: "
+    echo "Stopping ${PACKAGE_DESC}: "
     kill -9 `cat ${PACKAGE_NAME}.pid` || true
     echo "${PACKAGE_NAME}."
 }
@@ -52,17 +55,20 @@ if [ "$(id -u)" != "0" ]; then
     exit 0
 fi
 
-cd $(dirname $(readlink -f "$0"))
+# `readlink -f` won't work on Mac, this hack should work on all systems.
+cd $(dirname $($py -c "import os; print os.path.realpath('$0')"))
 
 case "$1" in
-    start)
+    # If no arg is given, start the goagent.
+    # If arg `start` is given, also start goagent.
+    '' | start)
         start
         ;;
     stop)
         stop
         ;;
     #reload)
-    restart|force-reload)
+    restart | force-reload)
         restart
         ;;
     *)
@@ -71,4 +77,3 @@ case "$1" in
 esac
 
 exit 0
-
