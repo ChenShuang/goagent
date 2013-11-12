@@ -116,7 +116,7 @@ def rc4crypt(data, key):
 
 
 try:
-    from Crypto.Cipher._ARC4 import new as rc4crypt_new
+    from Crypto.Cipher.ARC4 import new as rc4crypt_new
 except ImportError:
     pass
 
