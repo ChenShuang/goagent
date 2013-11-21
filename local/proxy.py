@@ -1589,42 +1589,39 @@ def response_replace_header(response, name, value):
         response.header.replace_header(name, value)
 
 
-class rc4crypt_new(object):
-    def __init__(self, key):
-        x = 0
-        box = range(256)
-        for i, y in enumerate(box):
-            x = (x + y + ord(key[i % len(key)])) & 0xff
-            box[i], box[x] = box[x], y
-        self.__box = box
-        self.__x = 0
-        self.__y = 0
-    def encrypt(self, data):
-        out = []
-        out_append = out.append
-        x = self.__x
-        y = self.__y
-        box = self.__box
-        for char in data:
-            x = (x + 1) & 0xff
-            y = (y + box[x]) & 0xff
-            box[x], box[y] = box[y], box[x]
-            out_append(chr(ord(char) ^ box[(box[x] + box[y]) & 0xff]))
-        self.__x = x
-        self.__y = y
-        return ''.join(out)
+try:
+    from Crypto.Cipher.ARC4 import new as rc4crypt_new
+except ImportError:
+    class rc4crypt_new(object):
+        def __init__(self, key):
+            x = 0
+            box = range(256)
+            for i, y in enumerate(box):
+                x = (x + y + ord(key[i % len(key)])) & 0xff
+                box[i], box[x] = box[x], y
+            self.__box = box
+            self.__x = 0
+            self.__y = 0
+        def encrypt(self, data):
+            out = []
+            out_append = out.append
+            x = self.__x
+            y = self.__y
+            box = self.__box
+            for char in data:
+                x = (x + 1) & 0xff
+                y = (y + box[x]) & 0xff
+                box[x], box[y] = box[y], box[x]
+                out_append(chr(ord(char) ^ box[(box[x] + box[y]) & 0xff]))
+            self.__x = x
+            self.__y = y
+            return ''.join(out)
 
 
 def rc4crypt(data, key):
     if not key or not data:
         return data
     return rc4crypt_new(key).encrypt(data)
-
-
-try:
-    from Crypto.Cipher.ARC4 import new as rc4crypt_new
-except ImportError:
-    pass
 
 
 class RC4FileObject(object):
@@ -1772,7 +1769,7 @@ class RangeFetch(object):
         range_queue = Queue.PriorityQueue()
         range_queue.put((start, end, self.response))
         self.length = length
-        wait_length = min(length, self.maxsize * 2)
+        wait_length = max(min(length, self.maxsize * 2), end+1)
         for begin in range(end+1, wait_length, self.waitsize):
             range_queue.put((begin, min(begin+self.waitsize, wait_length)-1, None))
         unusedThreads = self.threads - len(range(end+1, wait_length, self.waitsize)) - 1
